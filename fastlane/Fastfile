@@ -1,0 +1,134 @@
+fastlane_version '2.222.0'
+
+before_all do
+  ensure_git_status_clean
+  git_pull
+  
+  if ENV['NOTE'] == "true"
+    test_note = UI.input("Enter your test note:")
+    ENV['FASTLANE_TEST_NOTE'] = test_note
+  else
+    ENV['FASTLANE_TEST_NOTE'] = "No note provided."
+  end
+end
+
+def fetch_build_number
+  get_build_number(xcodeproj: './ios/ProjectName.xcodeproj')
+end
+
+def fetch_version_number
+  get_version_number(xcodeproj: './ios/ProjectName.xcodeproj')
+end
+
+def fetch_android_version_code
+  version_code = File.read('../android/gradle.properties').match(/^VERSION_CODE=(\d+)$/)[1]
+  version_code.to_s
+end
+
+def fetch_android_version_name
+  version_name = File.read('../android/gradle.properties').match(/^VERSION_NAME=(.+)$/)[1]
+  version_name.to_s
+end
+
+# You can send any errors Fastlane throws to another channel in slack, eg. #ci-errors
+error do |lane, exception|
+  slack(
+    message: "Error in lane: #{lane}\nException: #{exception.message}",
+    success: false,
+    # replace the URL with your own slack webhook URL
+    slack_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX" 
+  )
+end
+
+platform :ios do
+  # iOS Lanes
+  desc 'Fetch certificates and provisioning profiles'
+  lane :certificates do
+    match(app_identifier: 'com.app.bundle', type: 'development', readonly: true)
+    match(app_identifier: 'com.app.bundle', type: 'appstore', readonly: true)
+  end
+
+  desc 'Build the iOS application.'
+  private_lane :build do
+    certificates
+    increment_build_number(xcodeproj: './ios/ProjecName.xcodeproj')
+    gym(scheme: 'ProjectName', workspace: './ios/ProjectName.xcworkspace')
+  end
+
+  desc 'Ship to Testflight.'
+  lane :beta do
+    build
+
+    build_number = fetch_build_number
+    version_number = fetch_version_number
+    test_note = ENV['FASTLANE_TEST_NOTE']
+
+    app_store_connect_api_key(
+      key_id: "<key_id>",
+      issuer_id: "<issuer_id>",
+      key_filepath: "./AuthKey_####.p8",
+      duration: 1200,
+      in_house: false
+    )
+    pilot(
+      groups: ['external-group-name'],
+      changelog: test_note
+    )
+    commit_version_bump(message: 'Bump build', xcodeproj: './ios/ProjectName.xcodeproj')
+    push_to_git_remote
+
+    sh "cd .. && rm -f ./ProjectName.app.dSYM.zip ./ProjectName.ipa && cd -"
+
+    slack(
+      message: "🍎 iOS version #{version_number} (Build #{build_number}) is ready on TestFlight.\n📝 Test Notes: #{test_note}",
+      success: true,
+      # replace the URL with your own slack webhook URL
+      slack_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+    )
+  end
+end
+
+platform :android do
+  # Android Lanes
+  desc 'Build the Android application.'
+  private_lane :build do
+    gradle(task: 'clean', project_dir: 'android/')
+    gradle(task: 'incrementVersionCode', project_dir: 'android/')
+    gradle(task: 'bundle', build_type: 'Release', project_dir: 'android/')
+  end
+
+  desc 'Ship to Playstore Internal Testing.'
+  lane :internal_testing do
+    build
+
+    android_version_code = fetch_android_version_code
+    android_version_name = fetch_android_version_name
+
+    test_note = ENV['FASTLANE_TEST_NOTE']
+
+    changelog_path = "metadata/android/en-US/changelogs/default.txt"
+    File.write(changelog_path, ENV['FASTLANE_TEST_NOTE'])
+
+    supply(
+      skip_upload_metadata: true,
+      metadata_path: 'fastlane/metadata/android',
+      track: 'internal', 
+      track_promote_to: 'internal',
+    )
+    git_commit(path: ['./android/gradle.properties'], message: 'Bump versionCode')
+    push_to_git_remote
+
+    # Discard all unstaged changes
+    sh("git checkout -- .")
+
+    # Remove untracked files and directories
+    sh("git clean -fd")
+
+    slack(
+      message: "🤖 Android version #{android_version_name} (Build #{android_version_code}) is ready on Internal Testing. \n📝 Test Notes: #{test_note}",
+      success: true,
+      # replace the URL with your own slack webhook URL
+      slack_url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+    )
+  end
+end

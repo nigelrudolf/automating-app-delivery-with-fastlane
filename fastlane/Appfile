@@ -1,0 +1,3 @@
+# change the json_key_file to the path to inside the project
+json_key_file("path/to/key/file") # Path to the json secret file - Follow https://docs.fastlane.tools/actions/supply/#setup to get one
+package_name("com.app.bundle")
